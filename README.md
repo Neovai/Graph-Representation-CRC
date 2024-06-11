@@ -1,6 +1,6 @@
-# UNDETERMINED
+# Three-Class Classification Replication
 
-the results are run on a server with CPU 2.8 GHz Intel Core i7, 16GB RAM.
+This main branch is used to replicate the findings of this paper for the three-class CRC problem using their dataset.
 
 ## Contents
 
