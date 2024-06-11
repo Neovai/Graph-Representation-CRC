@@ -124,7 +124,7 @@ def test(valid_dataloader, gnnNets, criterion):
 
         F1 = f1_score(list(label_all), list(prob_all), average='macro')
         # AUC
-        # labels = [0, 1, 2]
+        labels = [0, 1, 2]
         label_all_for_auc = label_binarize(label_all, classes=labels)
         prob_all_for_auc = label_binarize(prob_all, classes=labels)
         AUC = roc_auc_score(label_all_for_auc, prob_all_for_auc, average='macro')
