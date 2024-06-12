@@ -7,6 +7,9 @@ def ascii_convert(l: list):
     return [ord(c) for c in l]
 
 def character_matrix(file):
+    """
+    Takes in a file and converts it to ASCII character matrix
+    """
     matrix = np.matrix([[-1] * 356] * 50)
     with open(file,"rt") as infile:
         raw_matrix = [ascii_convert(list(line)) for line in infile.readlines()]
@@ -17,7 +20,6 @@ def character_matrix(file):
 
 if __name__ == "__main__":
     path = sys.argv[1]
-    # type = sys.argv[2] # Neutral/Readable/Unreadable
     scan_dir = os.scandir(path)
     for entry in scan_dir:
         if entry.is_file() and ".java" in entry.name:
