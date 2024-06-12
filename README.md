@@ -1,6 +1,6 @@
 # Three-Class Classification Replication
 
-This main branch is used to replicate the findings of this paper for the three-class CRC problem using their dataset.
+This main branch is used to compare the model in the paper with a simple Machine Learning model - Random Forests
 
 ## Contents
 
