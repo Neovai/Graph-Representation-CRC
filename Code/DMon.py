@@ -1,9 +1,40 @@
 import torch
+from torch import Tensor
 from torch_geometric.nn import GCNConv, DenseGraphConv, DMoNPooling
 from math import ceil
 from torch_geometric.utils import to_dense_batch, to_dense_adj
 from torch.nn import Linear
 import torch.nn.functional as F
+
+class LinearLayer(torch.nn.Module):
+    """
+    Linear Layers for classification as outlined by the paper.
+    """
+    def __init__(self, data_args, model_args):
+        super().__init__()
+
+        self.in_channels = data_args.num_node_features
+        self.out_channels = data_args.num_classes
+        self.hidden_channels = model_args.hidden_channels
+        self.mlp_hidden = model_args.mlp_hidden
+
+        self.lin1 = Linear(self.in_channels, self.hidden_channels) # added to interface with new data
+        self.lin2 = Linear(self.hidden_channels, self.mlp_hidden)
+        self.lin3 = Linear(self.mlp_hidden, self.out_channels)
+    
+    def forward(self, x: Tensor):
+        x = self.lin1(x).relu()
+        x = self.lin2(x).relu()
+        x = self.lin3(x)
+        return F.log_softmax(x, dim=-1)
+    
+    def update_state_dict(self, state_dict):
+        original_state_dict = self.state_dict()
+        loaded_state_dict = dict()
+        for k, v in state_dict.items():
+            if k in original_state_dict.keys():
+                loaded_state_dict[k] = v
+        self.load_state_dict(loaded_state_dict)
 
 
 class DMon(torch.nn.Module):
@@ -63,9 +94,3 @@ class DMon(torch.nn.Module):
             if k in original_state_dict.keys():
                 loaded_state_dict[k] = v
         self.load_state_dict(loaded_state_dict)
-
-# torch.nn.Sigmoid()
-# torch.nn.LeakyReLU()
-# torch.nn.Relu()
-# torch.nn.ELU()
-# torch.nn.SELU()

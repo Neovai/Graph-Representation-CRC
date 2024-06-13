@@ -344,7 +344,7 @@ def json_parse_to_graph(N_PATHS_AST, R_PATHS_AST, U_PATHS_AST):
 
     for json_file in r_dataset_files:
         with open(os.path.join(R_PATHS_AST, json_file)) as f:
-            print(json_file)
+            # print(json_file)
             content = json.load(f)
             graph = ConvertToGraph(content)
             graph_list.append(graph)
@@ -353,7 +353,7 @@ def json_parse_to_graph(N_PATHS_AST, R_PATHS_AST, U_PATHS_AST):
 
     for json_file in n_dataset_files:
         with open(os.path.join(N_PATHS_AST, json_file)) as f:
-            print(json_file)
+            # print(json_file)
             content = json.load(f)
             graph = ConvertToGraph(content)
             graph_list.append(graph)
@@ -362,7 +362,7 @@ def json_parse_to_graph(N_PATHS_AST, R_PATHS_AST, U_PATHS_AST):
 
     for json_file in u_dataset_files:
         with open(os.path.join(U_PATHS_AST, json_file)) as f:
-            print(json_file)
+            # print(json_file)
             content = json.load(f)
             graph = ConvertToGraph(content)
             graph_list.append(graph)
@@ -370,6 +370,31 @@ def json_parse_to_graph(N_PATHS_AST, R_PATHS_AST, U_PATHS_AST):
             code_filename_list.append(os.path.join(U_PATHS_AST, json_file.replace(".json", ".java")))
 
     return graph_list, target_list, code_filename_list
+
+
+def Ablation_test(graph, file_name, tokenizer, model):
+    """
+    Returns CodeBert embedding of root node of AST + any block comments
+    """
+    node_range = graph["node_range"]
+    # print((file_name))
+    # Get root node of AST:
+    code_range = node_range[0]
+    # print((code_range))
+    nl_list, code_list = handleJavaCode(file_name, code_range)
+    # print(nl_list)
+    # Get last node in case of block comments:
+    code_range = node_range[-1]
+    # print((code_range))
+    nl_list2, _ = handleJavaCode(file_name, code_range)
+    # combine Natural Language list to include block comments (if present):
+    nl_list = nl_list + nl_list2
+    # print(nl_list)
+    # print(code_list)
+    # get code embedding of all comments and PL tokens:
+    node_embedding = codeEmbedding(nl_list, code_list, tokenizer, model)
+    # print(len(node_embedding))
+    return node_embedding
 
 
 def graph_to_input(graph, fileName, target, tokenizer, model):
@@ -1411,50 +1436,73 @@ def AddControlByHand(fileName, stmt_node_list):
 
 
 if __name__ == "__main__":
-    N_PATHS_AST = "Data/Neutral"
-    R_PATHS_AST = "Data/Readable"
-    U_PATHS_AST = "Data/Unreadable"
+    N_PATHS_AST = "../Dataset/Neutral"
+    R_PATHS_AST = "../Dataset/Readable"
+    U_PATHS_AST = "../Dataset/Unreadable"
     tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base")
     model = AutoModel.from_pretrained("microsoft/codebert-base")
     graph_list, target_list, code_filename_list = json_parse_to_graph(N_PATHS_AST, R_PATHS_AST, U_PATHS_AST)
 
-    graph_input = []
-    file_input = []
-    target_input = []
-    graph_raw_code_nodes = []
-
+    # Dataset to Pickle:
+    X = []
+    Y = []
+    file_names = []
+    # graph_input = []
+    # file_input = []
+    # graph_raw_code_nodes = []
     for i in range(len(graph_list)):
+        root_embedding = Ablation_test(graph_list[i], code_filename_list[i], tokenizer, model)
+        target = target_list[i]
+        print(len(root_embedding))
 
-        # if "Scalabrino84.java" in code_filename_list[i]:
-        node_type, raw_code_list, node_embedding_list, edge_list, edge_types, target, node_one_hot_list = graph_to_input(
-            graph_list[i], code_filename_list[i], target_list[i], tokenizer, model)
-        nodes_info = []
+        # Average embedding across N tokens:
+        root_embedding = np.array(root_embedding)
+        root_embedding = np.mean(root_embedding, axis=0)
 
-        # graph_raw_code_nodes.append({"graph_name": code_filename_list[i].split("/")[-1], "graph_nodes_codes": raw_code_list, "graph_nodes_type": node_type})
-        graph_raw_code_nodes.append(code_filename_list[i].split("\\")[-1])
-
-        for j in range(len(node_embedding_list)):
-            node_embedding = np.array(node_embedding_list[j])
-            node_embedding = np.mean(node_embedding_list[j], axis=0)
-            node_info = np.concatenate((node_embedding.tolist(), node_one_hot_list[j]), axis=0)
-            nodes_info.append(node_info)
-
-        x = torch.tensor(nodes_info)
+        # Add padding to data sample:
+        x = torch.tensor(root_embedding)
+        print(x.shape)
         x = x.to(torch.float32)
-        x_zero = torch.zeros(1000, 840).float()
-        x_zero[:x.size(0), :] = x
+        x_zero = torch.zeros(840).float()
+        x_zero[:x.size(0)] = x
+        print(x_zero.shape)
 
-        y = torch.tensor([target]).float()
-        edge_index = torch.tensor(edge_list)
-        graph_data = Data(x=x, edge_index=edge_index, y=target)
-        target_input.append(target)
-        # node_type #edge_type
-        graph_input.append(graph_data)
+        # Add sample to dataset:
+        # X.append(x_zero)
+        X.append({"x": x_zero, "y": target})
+        Y.append(target)
+        file_names.append(code_filename_list[i].split("\\")[-1])
 
-    pkl_data = {"file": graph_raw_code_nodes, "input": graph_input, "target": target_input}
+        # node_type, raw_code_list, node_embedding_list, edge_list, edge_types, target, node_one_hot_list = graph_to_input(
+        #     graph_list[i], code_filename_list[i], target_list[i], tokenizer, model)
+        # nodes_info = []
+
+        # # # graph_raw_code_nodes.append({"graph_name": code_filename_list[i].split("/")[-1], "graph_nodes_codes": raw_code_list, "graph_nodes_type": node_type})
+        # graph_raw_code_nodes.append(code_filename_list[i].split("\\")[-1])
+
+        # # for j in range(len(node_embedding_list)):
+        # #     node_embedding = np.array(node_embedding_list[j])
+        # #     node_embedding = np.mean(node_embedding_list[j], axis=0)
+        # #     node_info = np.concatenate((node_embedding.tolist(), node_one_hot_list[j]), axis=0)
+        # #     nodes_info.append(node_info)
+
+        # x = torch.tensor(nodes_info)
+        # x = x.to(torch.float32)
+        # x_zero = torch.zeros(1000, 840).float()
+        # x_zero[:x.size(0), :] = x
+
+        # y = torch.tensor([target]).float()
+        # edge_index = torch.tensor(edge_list)
+        # graph_data = Data(x=x, edge_index=edge_index, y=target)
+        # target_input.append(target)
+        # # node_type #edge_type
+        # graph_input.append(graph_data)
+
+    # pkl_data = {"file": graph_raw_code_nodes, "input": graph_input, "target": target_input}
+    pkl_data = {"file": file_names, "input": X, "target": Y}
     cpg_dataset = pd.DataFrame(pkl_data)
 
     # please change the name ("input_XXXXXX.pkl") if necessary
     # the "matrix" is not necessary here, it's for future studying
-    write_pkl(cpg_dataset[["input", "target"]], "", f"input.pkl")
+    write_pkl(cpg_dataset[["input", "target"]], "", f"ablation_test.pkl")
     print("Build pkl Successfully")

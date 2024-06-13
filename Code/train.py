@@ -1,6 +1,6 @@
 from configures import data_args, train_args, model_args
 from load_dataset import get_dataloader, balance_dataset, InputDataset, get_cross_dataloader
-from DMon import DMon
+from DMon import DMon, LinearLayer
 import numpy as np
 import torch.nn as nn
 from torch.optim import Adam
@@ -110,17 +110,22 @@ def test(valid_dataloader, gnnNets, criterion):
 
     with torch.no_grad():
         for data in valid_dataloader:
-            data = data.to(model_args.device)
-            pre, _ = gnnNets(data.x, data.edge_index, data.batch)
-            loss = criterion(pre, data.y)
+            x = data["x"]
+            y = data["y"]
+            x = x.to(model_args.device)
+            y = y.to(model_args.device)
+
+            # data = data.to(model_args.device)
+            pre = gnnNets(x)
+            loss = criterion(pre, y)
 
             ## record
             _, prediction = torch.max(pre, -1)
             prob_all.extend(prediction.cpu())
-            label_all.extend(data.y.cpu())
+            label_all.extend(y.cpu())
 
             loss_list.append(loss.item())
-            acc.append(prediction.eq(data.y).cpu().numpy())
+            acc.append(prediction.eq(y).cpu().numpy())
 
         F1 = f1_score(list(label_all), list(prob_all), average='macro')
         # AUC
@@ -147,14 +152,19 @@ def evaluate(valid_dataloader, gnnNets, criterion):
 
     with torch.no_grad():
         for data in valid_dataloader:
-            data = data.to(model_args.device)
-            pre, _ = gnnNets(data.x, data.edge_index, data.batch)
-            loss = criterion(pre, data.y)
+            x = data["x"]
+            y = data["y"]
+            x = x.to(model_args.device)
+            y = y.to(model_args.device)
+
+            # data = data.to(model_args.device)
+            pre = gnnNets(x)
+            loss = criterion(pre, y)
 
             ## record
             _, prediction = torch.max(pre, -1)
             loss_list.append(loss.item())
-            acc.append(prediction.eq(data.y).cpu().numpy())
+            acc.append(prediction.eq(y).cpu().numpy())
 
         valid_state = {'loss': np.average(loss_list),
                        'acc': np.concatenate(acc, axis=0).mean()}
@@ -197,11 +207,14 @@ def cross_train():
         dataloader = dataloader_list[i]
 
         print('start training model with fold ', i)
-        gnnNets = DMon(data_args, model_args)
-        gnnNets.to('cuda')
+        # gnnNets = DMon(data_args, model_args)
+        model = LinearLayer(data_args, model_args)
+        # gnnNets.to('cuda')
+        model.to('cuda')
 
         criterion = nn.CrossEntropyLoss()
-        optimizer = Adam(gnnNets.parameters(), lr=train_args.learning_rate, weight_decay=train_args.weight_decay)
+        # optimizer = Adam(gnnNets.parameters(), lr=train_args.learning_rate, weight_decay=train_args.weight_decay)
+        optimizer = Adam(model.parameters(), lr=train_args.learning_rate, weight_decay=train_args.weight_decay)
 
         # save path for model
         if not os.path.isdir('checkpoint'):
@@ -215,23 +228,29 @@ def cross_train():
         for epoch in range(train_args.max_epochs):
             acc = []
             loss_list = []
-            gnnNets.train()
+            # gnnNets.train()
+            model.train()
 
             for data in dataloader['train']:
-                data = data.to(model_args.device)
+                x = data["x"]
+                y = data["y"]
+                x = x.to(model_args.device)
+                y = y.to(model_args.device)
 
-                pre, _ = gnnNets(data.x, data.edge_index, data.batch)
-                loss = criterion(pre, data.y)
+                # pre, _ = gnnNets(data.x, data.edge_index, data.batch)
+                pre = model(x)
+                loss = criterion(pre, y)
 
                 # optimization
                 optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_value_(gnnNets.parameters(), clip_value=2.0)
+                # torch.nn.utils.clip_grad_value_(gnnNets.parameters(), clip_value=2.0)
+                torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=2.0)
                 optimizer.step()
 
                 ## record
                 _, prediction = torch.max(pre, -1)
-                acc.append(prediction.eq(data.y).cpu().numpy())
+                acc.append(prediction.eq(y).cpu().numpy())
                 loss_list.append(loss.item())
 
             # report train msg
@@ -240,11 +259,13 @@ def cross_train():
             print(f"Train Epoch:{epoch}  |Loss: {epoch_loss:.3f} | Train Acc: {epoch_acc:.3f}")
 
             # report valid msg
-            valid_state = evaluate(dataloader['valid'], gnnNets, criterion)
+            # valid_state = evaluate(dataloader['valid'], gnnNets, criterion)
+            valid_state = evaluate(dataloader['valid'], model, criterion)
             print(f"Eval Epoch: {epoch} | Loss: {valid_state['loss']:.3f} | Eval Acc: {valid_state['acc']:.3f}")
 
             # report test msg
-            test_state = evaluate(dataloader['test'], gnnNets, criterion)
+            # test_state = evaluate(dataloader['test'], gnnNets, criterion)
+            test_state = evaluate(dataloader['test'], model, criterion)
             print(f"Test Epoch: {epoch} | Loss: {test_state['loss']:.3f} | Test Acc: {test_state['acc']:.3f}")
 
             # only save the best model
@@ -262,16 +283,16 @@ def cross_train():
                 best_acc = valid_state['acc']
                 early_stop_count = 0
             if is_best or epoch % train_args.save_epoch == 0:
-                save_best(ckpt_dir, epoch, gnnNets, model_args.model_name, valid_state['acc'], is_best, i)
+                save_best(ckpt_dir, epoch, model, model_args.model_name, valid_state['acc'], is_best, i)
 
         print(f"The best validation accuracy is {best_acc}.")
         valid_acc.append(best_acc)
 
         # report test msg
         checkpoint = torch.load(os.path.join(ckpt_dir, f'{model_args.model_name}_best_{str(i)}.pth'))
-        gnnNets.update_state_dict(checkpoint['net'])
+        model.update_state_dict(checkpoint['net'])
 
-        test_state = test(dataloader['test'], gnnNets, criterion)
+        test_state = test(dataloader['test'], model, criterion)
         print(
             f"Test Acc: {test_state['acc']:.3f}   | Test F1: {test_state['f1']:.3f}   | Test AUC: {test_state['auc']:.3f}   | Test MCC: {test_state['mcc']:.3f}")
 

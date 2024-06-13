@@ -5,7 +5,7 @@ from typing import List
 
 
 class DataParser(Tap):
-    dataset_dir: str = '../Dataset/input.pkl'
+    dataset_dir: str = '../Dataset/ablation_test.pkl'
     dataset_name = 'code_hh'
     num_node_features: int = 840
     num_classes: int = 3
@@ -19,9 +19,9 @@ class DataParser(Tap):
 class TrainParser(Tap):
     learning_rate: float = 0.0001
     weight_decay: float = 0.0
-    max_epochs: int = 100
+    max_epochs: int = 250
     save_epoch: int = 10
-    early_stopping: int = 100
+    early_stopping: int = 250
 
 
 class ModelParser(Tap):

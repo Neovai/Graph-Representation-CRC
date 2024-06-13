@@ -48,6 +48,7 @@ def balance_dataset(dataset):
 
 def get_cross_dataloader(data_args):
     dataset = pd.read_pickle(data_args.dataset_dir)
+    print((dataset.shape))
 
     skf_1 = StratifiedKFold(n_splits=data_args.k_fold)
     skf_2 = StratifiedKFold(n_splits=data_args.k_fold - 1)
