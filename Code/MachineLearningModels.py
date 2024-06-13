@@ -1,6 +1,7 @@
 import os
 
 import torch
+import torch.utils
 import numpy as np
 import scipy.stats
 import tensorflow.keras as tk
@@ -8,9 +9,11 @@ from sklearn import svm
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, BaggingClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from tensorflow.keras import Sequential
-from tensorflow.keras.layers import Convolution2D, MaxPooling2D, Flatten, Dense, Dropout, Reshape
+from tensorflow.keras.layers import Convolution2D, MaxPooling2D, Flatten, Dense, Dropout, Reshape, Softmax
 from tensorflow.keras.optimizers import RMSprop
-from sklearn.metrics import f1_score, roc_auc_score
+from tensorflow.config.experimental import list_physical_devices
+from tensorflow.config import set_visible_devices, get_visible_devices
+from sklearn.metrics import f1_score, roc_auc_score, matthews_corrcoef
 from sklearn.model_selection import KFold
 
 
@@ -78,7 +81,7 @@ def load_data(data_dir):
     return data, label
 
 
-def classifier():
+def classifier(classification: bool):
     """
     Simple, fine-tuned CNN
     """
@@ -98,9 +101,14 @@ def classifier():
     model.add(Dense(units=128, activation='relu', kernel_regularizer=tk.regularizers.l2(0.001)))
     model.add(Dropout(0.5))
     model.add(Dense(units=32, activation='relu'))
+
+    if classification:
+        # add final linear layer w/ softmax activation to output class predictions:
+        model.add(Dense(units=3, activation='softmax'))
+
     rms = RMSprop(learning_rate=0.0015)
 
-    # 定义优化器，代价函数，训练过程中的准确率
+    # set optimizer, loss function, and evaluation metrics:
     model.compile(optimizer=rms, loss='categorical_crossentropy', metrics=['accuracy'])
     return model
 
@@ -112,19 +120,131 @@ def to_one_hot(data_labels, dimension=3):
     return results
 
 
+def cross_train_RF(X, Y, X_gen, Y_gen, k_folds, batch, n_epochs):
+    """
+    kfold cross-validation for CNN and random forest classifiers
+    """
+    kfold = KFold(n_splits=k_folds, shuffle=True)
+
+    fold_test_acc = []
+    fold_test_f1 = []
+    fold_test_auc = []
+    fold_test_mcc = []
+
+    for fold, (train_ids, test_ids) in enumerate(kfold.split(X, Y)):
+        print(f'\n ------------ FOLD {fold} ------------ \n')
+
+        # Random Forest with CNN feature learning:
+        RF_feature = classifier(classification=False)
+        model = RandomForestClassifier(n_estimators=40, random_state=20, bootstrap=True,
+                                             max_features='sqrt', warm_start=True)
+
+        # concat generated data with training data (not add to test data):
+        train_X = X[train_ids]
+        train_Y = Y[train_ids]
+        if X_gen.size > 0 and Y_gen.size > 0:
+            train_X = np.concatenate((X[train_ids], X_gen[train_ids]), axis=0)
+            train_Y = np.concatenate((Y[train_ids], Y_gen[train_ids]), axis=0)
+
+        # Get features for Random Forest Classifier:
+        train_X = RF_feature(train_X)
+        test_X = RF_feature(X[test_ids])
+
+        # train model on fold:
+        # convert raw single Y labels to one hot vector encoding of length 3:
+        # (requred to be compatible with CNN model output of softmax for each class)
+        model.fit(train_X, train_Y)
+
+        # test model on fold:
+        predictions = model.predict(test_X)
+        model_acc = model.score(test_X, Y[test_ids])
+
+        # Calculate results:
+        model_f1 = f1_score(Y[test_ids], predictions, average='macro')
+        model_auc = roc_auc_score(np.asarray(to_one_hot(Y[test_ids])), np.asarray(to_one_hot(predictions)), average='macro', multi_class='ovo')
+        model_mcc = matthews_corrcoef(Y[test_ids], predictions)
+
+        # print fold results:
+        print(f"[Fold {fold}] Test Acc: {model_acc}     | F1: {model_f1}    | AUC: {model_auc}  | MCC: {model_mcc}")
+
+        fold_test_acc.append(model_acc)
+        fold_test_f1.append(model_f1)
+        fold_test_auc.append(model_auc)
+        fold_test_mcc.append(model_mcc)
+
+    return np.average(fold_test_acc), np.average(fold_test_f1), np.average(fold_test_auc), np.average(fold_test_mcc)
+
+
+def cross_train(X, Y, X_gen, Y_gen, k_folds, batch, n_epochs):
+    """
+    kfold cross-validation for CNN
+    """
+    kfold = KFold(n_splits=k_folds, shuffle=True)
+
+    fold_test_acc = []
+    fold_test_f1 = []
+    fold_test_auc = []
+    fold_test_mcc = []
+
+    for fold, (train_ids, test_ids) in enumerate(kfold.split(X, Y)):
+        print(f'\n ------------ FOLD {fold} ------------ \n')
+
+        # Simple CNN for results replication of paper:
+        model = classifier(classification=True)
+
+        # concat generated data with training data (not add to test data):
+        train_X = X[train_ids]
+        train_Y = Y[train_ids]
+        if X_gen.size > 0 and Y_gen.size > 0:
+            train_X = np.concatenate((X[train_ids], X_gen[train_ids]), axis=0)
+            train_Y = np.concatenate((Y[train_ids], Y_gen[train_ids]), axis=0)
+        print(train_ids.shape)
+        print(X[train_ids].shape)
+        print(train_X.shape)
+
+        # train model on fold:
+        # convert raw single Y labels to one hot vector encoding of length 3:
+        # (requred to be compatible with CNN model output of softmax for each class)
+        model.fit(train_X, to_one_hot(train_Y), batch_size=batch, epochs=n_epochs, verbose=2)
+
+        # test model on fold:
+        model_scores = model.evaluate(X[test_ids], to_one_hot(Y[test_ids]), verbose=0, return_dict=True)
+        predictions = np.argmax(model(X[test_ids]), axis=1)
+
+        # Calculate results:
+        model_acc = model_scores["accuracy"]
+        loss = model_scores["loss"]
+        model_f1 = f1_score(Y[test_ids], predictions, average='macro')
+        model_auc = roc_auc_score(np.asarray(to_one_hot(Y[test_ids])), np.asarray(to_one_hot(predictions)), average='macro', multi_class='ovo')
+        model_mcc = matthews_corrcoef(Y[test_ids], predictions)
+
+        # print fold results:
+        print(f"[Fold {fold}] Test Acc: {model_acc}  | Loss: {loss}  | F1: {model_f1}    | AUC: {model_auc}  | MCC: {model_mcc}")
+
+        fold_test_acc.append(model_acc)
+        fold_test_f1.append(model_f1)
+        fold_test_auc.append(model_auc)
+        fold_test_mcc.append(model_mcc)
+
+    return np.average(fold_test_acc), np.average(fold_test_f1), np.average(fold_test_auc), np.average(fold_test_mcc)
+
+
 if __name__ == '__main__':
+    # Enable CPU use only: (Don't have TensorFlow GPU support)
+    cpus = list_physical_devices('CPU')
+    set_visible_devices([], 'GPU')
+    set_visible_devices(cpus[0], 'CPU')
+    get_visible_devices()
+
+    # Pull in original dataset:
     original_set = '../Dataset/Structure'
     X, Y = load_data(original_set)
     shuffle_list(X, Y)
-    # augment_set = '../../Dataset/RQ2/2gan'
-    # X1, Y1 = load_data(augment_set)
-    # shuffle_list(X1, Y1)
 
-    # test_set = '../../Dataset/original_dataset/validate'
-    # x_test, y_test = load_data(test_set)
-    # shuffle_list(x_test, y_test)
-    # print('Shape of train data tensor:', X.shape)
-    # print('Shape of validate data tensor:', x_test.shape)
+    # Pull in generated dataset:
+    generated_set = '../Dataset/generated_dataset'
+    X_gen, Y_gen = load_data(generated_set)
+    shuffle_list(X_gen, Y_gen)
 
     forest_acc_results = []
     forest_f1_results = []
@@ -150,119 +270,7 @@ if __name__ == '__main__':
     k_folds = 5
     batch = 15
     n_epochs = 100
-    kfold = KFold(n_splits=k_folds, shuffle=True)
-
-    for fold, (train_ids, test_ids) in enumerate(kfold.split(X, Y)):
-        print(f'FOLD {fold}')
-        # Sample elements randomly with no replacement:
-        train_subsampler = torch.utils.data.SubsetRandomSampler(train_ids)
-        print(train_ids)
-        test_subsampler = torch.utils.data.SubsetRandomSampler(test_ids)
-        trainloader = torch.utils.data.DataLoader(
-                      X, 
-                      batch_size=batch, sampler=train_subsampler)
-        testloader = torch.utils.data.DataLoader(
-                      X,
-                      batch_size=batch, sampler=test_subsampler)
-
-        # Simple CNN for results replication of paper:
-        model = classifier()
-
-        for epoch in range(n_epochs):
-            print(f"EPOCh {epoch}")
-            loss = 0.0
-            for i, data in enumerate(trainloader, 0):
-                x, y = data
-
-    for i in range(5):
-        model = classifier()
-        train_feature = []
-        val_feature = []
-        train_feature1 = []
-        for feature in model.predict(X):
-            train_feature.append(feature)
-
-        for feature in model.predict(X1):
-            train_feature1.append(feature)
-
-        for feature in model.predict(x_test):
-            val_feature.append(feature)
-
-        train_feature = np.asarray(train_feature)
-        train_feature1 = np.asarray(train_feature1)
-
-        for feature_num in range(2, 100, 2):
-            forest1 = RandomForestClassifier(n_estimators=feature_num, random_state=20, bootstrap=True,
-                                             max_features='sqrt', warm_start=True)
-            forest1.fit(train_feature, Y)
-            result1 = forest1.predict(val_feature)
-            forest_acc_results.append(forest1.score(val_feature, y_test))
-            f1 = f1_score(y_test, result1, average='micro')
-            f1a = f1_score(y_test, result1, average='macro')
-            roc1a = roc_auc_score(np.asarray(to_one_hot(y_test)), np.asarray(to_one_hot(result1)), multi_class='ovo')
-            forest_f1_results.append(f1)
-            forest_f2_results.append(f1a)
-            forest_auc_results.append(roc1a)
-
-            forest2 = RandomForestClassifier(n_estimators=feature_num, random_state=20, bootstrap=True,
-                                             max_features='sqrt', warm_start=True)
-            forest2.fit(train_feature1, Y1)
-            result2 = forest2.predict(val_feature)
-            forest_acc_results1.append(forest2.score(val_feature, y_test))
-            f2 = f1_score(y_test, result2, average='micro')
-            f2a = f1_score(y_test, result2, average='macro')
-            roc2a = roc_auc_score(np.asarray(to_one_hot(y_test)), np.asarray(to_one_hot(result2)), multi_class='ovo')
-            forest_f1_results1.append(f2)
-            forest_f2_results1.append(f2a)
-            forest_auc_results1.append(roc2a)
-
-        for n_neighbors in range(1, 30, 1):
-            knn1 = KNeighborsClassifier(n_neighbors=n_neighbors)
-            knn1.fit(train_feature, Y)
-            result1 = knn1.predict(val_feature)
-            knn_acc_result.append(knn1.score(val_feature, y_test))
-            f1 = f1_score(y_test, result1, average='micro')
-            f1a = f1_score(y_test, result1, average='macro')
-            roc1a = roc_auc_score(np.asarray(to_one_hot(y_test)), np.asarray(to_one_hot(result1)), multi_class='ovo')
-            knn_f1_result.append(f1)
-            knn_f2_result.append(f1a)
-            knn_auc_result.append(roc1a)
-
-            knn2 = KNeighborsClassifier(n_neighbors=n_neighbors)
-            knn2.fit(train_feature1, Y1)
-            result2 = knn2.predict(val_feature)
-            knn_acc_result1.append(knn2.score(val_feature, y_test))
-            f1 = f1_score(y_test, result2, average='micro')
-            f1a = f1_score(y_test, result2, average='macro')
-            roc1a = roc_auc_score(np.asarray(to_one_hot(y_test)), np.asarray(to_one_hot(result2)), multi_class='ovo')
-            knn_f1_result1.append(f1)
-            knn_f2_result1.append(f1a)
-            knn_auc_result1.append(roc1a)
-
-    print('random forest acc result0:', np.max(forest_acc_results))
-    print('random forest f1 result0:', np.max(forest_f1_results))
-    print('random forest f2 result0:', np.max(forest_f2_results))
-    print('random forest roc result0:', np.max(forest_auc_results))
-
-    print('knn acc result0:', np.max(knn_acc_result))
-    print('knn f1 result0:', np.max(knn_f1_result))
-    print('knn f2 result0:', np.max(knn_f2_result))
-    print('knn roc result0:', np.max(knn_auc_result))
-
-
-    print('random forest result1:', np.max(forest_acc_results1))
-    print('random forest f1 result1:', np.max(forest_f1_results1))
-    print('random forest f2 result1:', np.max(forest_f2_results1))
-    print('random forest roc result1:', np.max(forest_auc_results1))
-
-    print('knn result1:', np.max(knn_acc_result1))
-    print('knn f1 result1:', np.max(knn_f1_result1))
-    print('knn f2 result1:', np.max(knn_f2_result1))
-    print('knn roc result1:', np.max(knn_auc_result1))
-
-    print('数据统计:')
-
-    print('RF acc improve:', np.max(forest_acc_results1) - np.max(forest_acc_results))
-    print('RF f1 improve:', np.max(forest_f1_results1) - np.max(forest_f1_results))
-    # print('KNN acc improve:', np.max(knn_acc_result1) - np.max(knn_acc_result))
-    # print('KNN f1 improve:', np.max(knn_f1_result1) - np.max(knn_f1_result))
+    acc, f1, auc, mcc = cross_train(X, Y, X_gen, Y_gen, k_folds, batch, n_epochs)
+    print(f"\n[Final Average Scores CNN] Test Acc: {acc}     | F1: {f1}    | AUC: {auc}  | MCC: {mcc}")
+    acc_rf, f1_rf, auc_rf, mcc_rf = cross_train_RF(X, Y, X_gen, Y_gen, k_folds, batch, n_epochs)
+    print(f"\n[Final Average Scores RF] Test Acc: {acc_rf}     | F1: {f1_rf}    | AUC: {auc_rf}  | MCC: {mcc_rf}")
